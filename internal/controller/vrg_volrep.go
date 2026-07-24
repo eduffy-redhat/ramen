@@ -2646,10 +2646,11 @@ func handleExistingObject[
 	},
 ](
 	v *VRGInstance,
-	object *ObjectType, obj ClientObject,
-	validateExistingObject func(*ObjectType) error,
+	obj ClientObject,
+	validateExistingObject func(*ObjectType) (*ObjectType, error),
 ) bool {
-	if err := validateExistingObject(object); err != nil {
+	newObj, err := validateExistingObject(obj)
+	if err != nil {
 		v.log.Info("Object exists. Ignoring and moving to next object", "error", err.Error())
 
 		return false
@@ -2657,12 +2658,30 @@ func handleExistingObject[
 
 	// Valid object exists and it is managed by Ramen
 	// If it's a PVC, update it; otherwise just count it as restored
-	if pvc, ok := any(obj).(*corev1.PersistentVolumeClaim); ok {
+	if pvc, ok := any(newObj).(*corev1.PersistentVolumeClaim); ok {
+		v.log.Info("Validated existing PVC", "PVC", pvc)
+
 		if err := v.reconciler.Update(v.ctx, pvc); err != nil {
 			v.log.Info("Failed to update existing PVC", "name", pvc.GetName(), "error", err.Error())
 
 			return false
 		}
+
+		v.log.Info("Updated existing PVC", "PVC", pvc)
+
+		return true
+	}
+
+	if pv, ok := any(newObj).(*corev1.PersistentVolume); ok {
+		v.log.Info("Validated existing PV", "PV", pv)
+
+		if err := v.reconciler.Update(v.ctx, pv); err != nil {
+			v.log.Info("Failed to update existing PV", "name", pv.GetName(), "error", err.Error())
+
+			return false
+		}
+
+		v.log.Info("Updated existing PV", "PV", pv)
 	}
 
 	return true
@@ -2678,16 +2697,14 @@ func restoreClusterDataObjects[
 	v *VRGInstance,
 	objList []ObjectType, objType string,
 	cleanupForRestore func(*ObjectType) error,
-	validateExistingObject func(*ObjectType) error,
+	validateExistingObject func(*ObjectType) (*ObjectType, error),
 ) (int, error) {
 	numRestored := 0
 
 	for i := range objList {
-		object := &objList[i]
-		objectCopy := &*object
-		obj := ClientObject(objectCopy)
+		obj := ClientObject(&objList[i])
 
-		err := cleanupForRestore(objectCopy)
+		err := cleanupForRestore(obj)
 		if err != nil {
 			v.log.Info("failed to cleanup during restore", "error", err.Error())
 
@@ -2698,7 +2715,7 @@ func restoreClusterDataObjects[
 
 		if err := v.reconciler.Create(v.ctx, obj); err != nil {
 			if k8serrors.IsAlreadyExists(err) {
-				if handleExistingObject(v, object, obj, validateExistingObject) {
+				if handleExistingObject(v, obj, validateExistingObject) {
 					numRestored++
 				}
 
@@ -2743,12 +2760,12 @@ func (v *VRGInstance) updateExistingPVForSync(pv *corev1.PersistentVolume) error
 
 // validateExistingPV validates if an existing PV matches the passed in PV for certain fields. Returns error
 // if a match fails or a match is not possible given the state of the existing PV
-func (v *VRGInstance) validateExistingPV(pv *corev1.PersistentVolume) error {
+func (v *VRGInstance) validateExistingPV(pv *corev1.PersistentVolume) (*corev1.PersistentVolume, error) {
 	log := v.log.WithValues("PV", pv.Name)
 
 	existingPV := &corev1.PersistentVolume{}
 	if err := v.reconciler.Get(v.ctx, types.NamespacedName{Name: pv.Name}, existingPV); err != nil {
-		return fmt.Errorf("failed to get PV %s: %w", pv.Name, err)
+		return nil, fmt.Errorf("failed to get PV %s: %w", pv.Name, err)
 	}
 
 	if existingPV.Status.Phase == corev1.VolumeBound {
@@ -2756,12 +2773,12 @@ func (v *VRGInstance) validateExistingPV(pv *corev1.PersistentVolume) error {
 
 		pvcNamespacedName := types.NamespacedName{Name: pv.Spec.ClaimRef.Name, Namespace: pv.Spec.ClaimRef.Namespace}
 		if err := v.reconciler.Get(v.ctx, pvcNamespacedName, &pvc); err != nil {
-			return fmt.Errorf("found bound PV %s to claim %s but unable to validate claim exists: %w", existingPV.GetName(),
+			return nil, fmt.Errorf("found bound PV %s to claim %s but unable to validate claim exists: %w", existingPV.GetName(),
 				pvcNamespacedName.String(), err)
 		}
 
 		if rmnutil.ResourceIsDeleted(&pvc) {
-			return fmt.Errorf("existing bound PV %s claim %s deletion timestamp non-zero %v", existingPV.GetName(),
+			return nil, fmt.Errorf("existing bound PV %s claim %s deletion timestamp non-zero %v", existingPV.GetName(),
 				pvcNamespacedName.String(), pvc.DeletionTimestamp)
 		}
 
@@ -2769,10 +2786,10 @@ func (v *VRGInstance) validateExistingPV(pv *corev1.PersistentVolume) error {
 		if v.pvMatches(existingPV, pv) {
 			log.Info("Existing PV matches and is bound to the same claim")
 
-			return nil
+			return pv, nil
 		}
 
-		return fmt.Errorf("existing PV (%s) is bound and doesn't match with the PV to be restored", existingPV.GetName())
+		return nil, fmt.Errorf("existing PV (%s) is bound and doesn't match with the PV to be restored", existingPV.GetName())
 	}
 
 	log.Info("PV exists and is not bound", "phase", existingPV.Status.Phase)
@@ -2782,7 +2799,15 @@ func (v *VRGInstance) validateExistingPV(pv *corev1.PersistentVolume) error {
 	if v.instance.Spec.Sync != nil {
 		log.Info("PV exists and will be updated for sync")
 
-		return v.updateExistingPVForSync(existingPV)
+		return pv, v.updateExistingPVForSync(existingPV)
+	}
+
+	if existingPV.Status.Phase == corev1.VolumeReleased {
+		log.Info("PV exists and is Released")
+
+		existingPV.Spec.ClaimRef = pv.Spec.ClaimRef
+
+		return existingPV, nil
 	}
 
 	// PV is not bound
@@ -2793,40 +2818,41 @@ func (v *VRGInstance) validateExistingPV(pv *corev1.PersistentVolume) error {
 		// and then we don't care if deletion takes place later, which is what we do now?
 		log.Info("PV exists and managed by Ramen")
 
-		return nil
+		return existingPV, nil
 	}
 
 	// PV is not bound and not managed by Ramen
-	return fmt.Errorf("found existing PV (%s) not restored by Ramen and not matching with backed up PV", existingPV.Name)
+	return nil, fmt.Errorf("found existing PV (%s) not restored by Ramen and not matching with backed up PV",
+		existingPV.Name)
 }
 
 // validateExistingPVC validates if an existing PVC matches the passed in PVC for certain fields. Returns error
 // if a match fails or a match is not possible given the state of the existing PVC
-func (v *VRGInstance) validateExistingPVC(pvc *corev1.PersistentVolumeClaim) error {
+func (v *VRGInstance) validateExistingPVC(pvc *corev1.PersistentVolumeClaim) (*corev1.PersistentVolumeClaim, error) {
 	existingPVC := &corev1.PersistentVolumeClaim{}
 	pvcNSName := types.NamespacedName{Name: pvc.Name, Namespace: pvc.Namespace}
 
 	err := v.reconciler.Get(v.ctx, pvcNSName, existingPVC)
 	if err != nil {
-		return fmt.Errorf("failed to get existing PVC %s (%w)", pvcNSName.String(), err)
+		return nil, fmt.Errorf("failed to get existing PVC %s (%w)", pvcNSName.String(), err)
 	}
 
 	if existingPVC.Status.Phase != corev1.ClaimBound {
-		return fmt.Errorf("PVC %s exists and is not bound (phase: %s)", pvcNSName.String(), existingPVC.Status.Phase)
+		return nil, fmt.Errorf("PVC %s exists and is not bound (phase: %s)", pvcNSName.String(), existingPVC.Status.Phase)
 	}
 
 	if rmnutil.ResourceIsDeleted(existingPVC) {
-		return fmt.Errorf("existing bound PVC %s is being deleted", pvcNSName.String())
+		return nil, fmt.Errorf("existing bound PVC %s is being deleted", pvcNSName.String())
 	}
 
 	if existingPVC.Spec.VolumeName != pvc.Spec.VolumeName {
-		return fmt.Errorf("PVC %s exists and bound to a different PV %s than PV %s desired",
+		return nil, fmt.Errorf("PVC %s exists and bound to a different PV %s than PV %s desired",
 			pvcNSName.String(), existingPVC.Spec.VolumeName, pvc.Spec.VolumeName)
 	}
 
 	v.log.Info(fmt.Sprintf("PVC %s exists and bound to desired PV %s", pvcNSName.String(), existingPVC.Spec.VolumeName))
 
-	return nil
+	return pvc, nil
 }
 
 // pvMatches checks if the PVs fields match presuming x is bound to a PVC. Used to detect PVCs that were not
@@ -2943,6 +2969,8 @@ func (v *VRGInstance) processPVSecrets(pv *corev1.PersistentVolume, sc *storagev
 // to a new cluster, and rebinding the PVC to an existing PV with the same claimRef
 func (v *VRGInstance) cleanupPVForRestore(pv *corev1.PersistentVolume) error {
 	pv.ResourceVersion = ""
+	pv.UID = ""
+
 	if pv.Spec.ClaimRef != nil {
 		pv.Spec.ClaimRef.UID = ""
 		pv.Spec.ClaimRef.ResourceVersion = ""

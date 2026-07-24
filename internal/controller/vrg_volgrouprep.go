@@ -1314,34 +1314,36 @@ func (v *VRGInstance) checkVGRCClusterData(vgrcList []volrep.VolumeGroupReplicat
 	return nil
 }
 
-func (v *VRGInstance) validateExistingVGRC(vgrc *volrep.VolumeGroupReplicationContent) error {
+func (v *VRGInstance) validateExistingVGRC(
+	vgrc *volrep.VolumeGroupReplicationContent,
+) (*volrep.VolumeGroupReplicationContent, error) {
 	existingVGRC := &volrep.VolumeGroupReplicationContent{}
 	if err := v.reconciler.Get(v.ctx, types.NamespacedName{Name: vgrc.Name}, existingVGRC); err != nil {
-		return fmt.Errorf("failed to get existing VGRC %s (%w)", vgrc.Name, err)
+		return nil, fmt.Errorf("failed to get existing VGRC %s (%w)", vgrc.Name, err)
 	}
 
 	if rmnutil.ResourceIsDeleted(existingVGRC) {
-		return fmt.Errorf("existing VGRC %s is being deleted", existingVGRC.Name)
+		return nil, fmt.Errorf("existing VGRC %s is being deleted", existingVGRC.Name)
 	}
 
-	return nil
+	return vgrc, nil
 }
 
-func (v *VRGInstance) validateExistingVGR(vgr *volrep.VolumeGroupReplication) error {
+func (v *VRGInstance) validateExistingVGR(vgr *volrep.VolumeGroupReplication) (*volrep.VolumeGroupReplication, error) {
 	existingVGR := &volrep.VolumeGroupReplication{}
 	vgrNSName := types.NamespacedName{Name: vgr.Name, Namespace: vgr.Namespace}
 
 	err := v.reconciler.Get(v.ctx, vgrNSName, existingVGR)
 	if err != nil {
-		return fmt.Errorf("failed to get existing VGR %s (%w)", vgrNSName.String(), err)
+		return nil, fmt.Errorf("failed to get existing VGR %s (%w)", vgrNSName.String(), err)
 	}
 
 	if rmnutil.ResourceIsDeleted(existingVGR) {
-		return fmt.Errorf("existing VGR %s is being deleted", vgrNSName.String())
+		return nil, fmt.Errorf("existing VGR %s is being deleted", vgrNSName.String())
 	}
 
 	if existingVGR.Spec.VolumeGroupReplicationContentName != vgr.Spec.VolumeGroupReplicationContentName {
-		return fmt.Errorf("VGR %s exists and refers to a different VGRC %s than VGRC %s desired",
+		return nil, fmt.Errorf("VGR %s exists and refers to a different VGRC %s than VGRC %s desired",
 			vgrNSName.String(), existingVGR.Spec.VolumeGroupReplicationContentName,
 			vgr.Spec.VolumeGroupReplicationContentName)
 	}
@@ -1349,7 +1351,7 @@ func (v *VRGInstance) validateExistingVGR(vgr *volrep.VolumeGroupReplication) er
 	v.log.Info(fmt.Sprintf("VGR %s exists and refers to desired VGRC %s", vgrNSName.String(),
 		existingVGR.Spec.VolumeGroupReplicationContentName))
 
-	return nil
+	return vgr, nil
 }
 
 func (v *VRGInstance) cleanupVGRCForRestore(vgrc *volrep.VolumeGroupReplicationContent) error {
