@@ -6,6 +6,7 @@ package controllers
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	volrep "github.com/csi-addons/kubernetes-csi-addons/api/replication.storage/v1alpha1"
@@ -1359,6 +1360,7 @@ func (v *VRGInstance) cleanupVGRCForRestore(vgrc *volrep.VolumeGroupReplicationC
 	// on this (destination) cluster.
 	if vgrc.Annotations != nil {
 		if destHandle, ok := vgrc.Annotations[destinationVolumeGroupHandleAnnotation]; ok && destHandle != "" {
+			destHandle, _, _ := strings.Cut(destHandle, "/")
 			v.log.V(1).Info("Set VGRC volume group replication handle from destination handle",
 				"VGRC", vgrc.Name, "handle", destHandle)
 			vgrc.Spec.VolumeGroupReplicationHandle = destHandle
