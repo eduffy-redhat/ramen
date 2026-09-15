@@ -2605,11 +2605,18 @@ func (r *VolumeReplicationGroupReconciler) addKubeObjectsOwnsAndWatches(ctrlBuil
 
 	kubeObjectsRequestsWatch(ctrlBuilder, r.Scheme, r.kubeObjects)
 
-	// watch for recipe objects
-	objectToReconcileRequestsMapper := objectToReconcileRequestsMapper{reader: r.Client, log: ctrl.Log}
-	recipesWatch(ctrlBuilder, objectToReconcileRequestsMapper)
-
 	r.veleroCRsAreWatched = true
+
+	// watch for recipe objects, if the Recipe CRD is installed
+	installedCRD := &apiextensionsv1.CustomResourceDefinition{}
+	if err := r.APIReader.Get(context.TODO(),
+		types.NamespacedName{Name: "recipes.ramendr.openshift.io"}, installedCRD); err != nil {
+		r.Log.Info("Cannot fetch Recipe CRD; recipes won't be watched unless the Recipe CRD is installed",
+			"error", err)
+	} else {
+		objectToReconcileRequestsMapper := objectToReconcileRequestsMapper{reader: r.Client, log: ctrl.Log}
+		recipesWatch(ctrlBuilder, objectToReconcileRequestsMapper)
+	}
 
 	return ctrlBuilder
 }
