@@ -100,8 +100,9 @@ func UsePrivateVGSAPI() bool {
 }
 
 // SelectVGSGroupVersion picks the VGS API GroupVersion using the same precedence as
-// UsePublicVGSAPI / UsePrivateVGSAPI: public if its CRD is installed and serves the
-// public client's version, otherwise private under the same rule.
+// UsePublicVGSAPI / UsePrivateVGSAPI: public if its VolumeGroupSnapshot and
+// VolumeGroupSnapshotClass CRDs are installed and serve the public client's version,
+// otherwise private under the same rule.
 func SelectVGSGroupVersion(ctx context.Context, apiReader client.Reader) (schema.GroupVersion, error) {
 	return resolveVGSGroupVersion(func(crdName string) (*apiextensionsv1.CustomResourceDefinition, error) {
 		crd := &apiextensionsv1.CustomResourceDefinition{}
@@ -145,47 +146,85 @@ func crdServedVersions(crd *apiextensionsv1.CustomResourceDefinition) []string {
 
 // resolveVGSGroupVersion applies the public-first precedence rule given a function
 // that returns a named CRD ((nil, nil) when absent). A candidate qualifies only if
-// its CRD serves the version Ramen's client for that API speaks. Shared by local
-// and managed-cluster callers.
+// every CRD backing it serves the version Ramen's client for that API speaks.
+// Shared by local and managed-cluster callers.
 func resolveVGSGroupVersion(
 	getCRD func(string) (*apiextensionsv1.CustomResourceDefinition, error),
 ) (schema.GroupVersion, error) {
 	candidates := []struct {
-		crdName string
-		gv      schema.GroupVersion
+		crdNames []string
+		gv       schema.GroupVersion
 	}{
-		{VGSCRDName, publicgroupsnapv1.SchemeGroupVersion},
-		{VGSCRDPrivateName, groupsnapv1beta1.SchemeGroupVersion},
+		{[]string{VGSCRDName, VGSClassCRDName}, publicgroupsnapv1.SchemeGroupVersion},
+		{[]string{VGSCRDPrivateName, VGSClassCRDPrivateName}, groupsnapv1beta1.SchemeGroupVersion},
 	}
 
-	mismatches := []string{}
+	problems := []string{}
 
 	for _, c := range candidates {
-		crd, err := getCRD(c.crdName)
+		qualifies, candidateProblems, err := vgsCandidateQualifies(getCRD, c.crdNames, c.gv.Version)
 		if err != nil {
-			return schema.GroupVersion{}, fmt.Errorf("checking VGS CRD %q: %w", c.crdName, err)
+			return schema.GroupVersion{}, err
 		}
 
-		if crd == nil {
-			continue
-		}
-
-		if crdServesVersion(crd, c.gv.Version) {
+		if qualifies {
 			return c.gv, nil
 		}
 
-		mismatches = append(mismatches, fmt.Sprintf("%s is installed but serves [%s], not the required %s",
-			c.crdName, strings.Join(crdServedVersions(crd), ", "), c.gv.Version))
+		problems = append(problems, candidateProblems...)
 	}
 
-	msg := "VolumeGroupSnapshot CRD is required. " +
+	msg := "VolumeGroupSnapshot and VolumeGroupSnapshotClass CRDs are required. " +
 		"Please install either the public (groupsnapshot.storage.k8s.io) or private (groupsnapshot.storage.openshift.io) " +
-		"VolumeGroupSnapshot CRD and restart the operator"
-	if len(mismatches) > 0 {
-		msg += ": " + strings.Join(mismatches, "; ")
+		"VolumeGroupSnapshot CRDs and restart the operator"
+	if len(problems) > 0 {
+		msg += ": " + strings.Join(problems, "; ")
 	}
 
 	return schema.GroupVersion{}, fmt.Errorf("%s", msg)
+}
+
+// vgsCandidateQualifies reports whether every CRD backing one VGS API candidate is
+// installed and serves the given version. VolumeGroupSnapshot and
+// VolumeGroupSnapshotClass are separate CRDs, so an API is only usable when both
+// qualify: registering a watch on a kind whose CRD is absent leaves that informer
+// unable to sync, blocking the whole controller.
+//
+// The returned strings describe why the candidate was rejected, and are empty when
+// none of its CRDs are installed - that API is simply not present, which the
+// caller's generic message already covers.
+func vgsCandidateQualifies(
+	getCRD func(string) (*apiextensionsv1.CustomResourceDefinition, error),
+	crdNames []string,
+	version string,
+) (bool, []string, error) {
+	absent := []string{}
+	problems := []string{}
+
+	for _, crdName := range crdNames {
+		crd, err := getCRD(crdName)
+		if err != nil {
+			return false, nil, fmt.Errorf("checking VGS CRD %q: %w", crdName, err)
+		}
+
+		switch {
+		case crd == nil:
+			absent = append(absent, crdName)
+		case !crdServesVersion(crd, version):
+			problems = append(problems, fmt.Sprintf("%s is installed but serves [%s], not the required %s",
+				crdName, strings.Join(crdServedVersions(crd), ", "), version))
+		}
+	}
+
+	if len(absent) == len(crdNames) {
+		return false, nil, nil
+	}
+
+	for _, crdName := range absent {
+		problems = append(problems, fmt.Sprintf("%s is not installed", crdName))
+	}
+
+	return len(problems) == 0, problems, nil
 }
 
 // NewVolumeGroupSnapshot returns an empty VolumeGroupSnapshot of the appropriate API type.
@@ -331,18 +370,22 @@ func GetVolumeGroupSnapshotClasses(
 		)
 	}
 
-	return listVolumeGroupSnapshotClasses(
-		ctx, k8sClient, selector,
-		&groupsnapv1beta1.VolumeGroupSnapshotClassList{},
-		func(list *groupsnapv1beta1.VolumeGroupSnapshotClassList) []VolumeGroupSnapshotClassWrapper {
-			wrappers := make([]VolumeGroupSnapshotClassWrapper, 0, len(list.Items))
-			for i := range list.Items {
-				wrappers = append(wrappers, &privateVGSCWrapper{vgsc: &list.Items[i]})
-			}
+	if UsePrivateVGSAPI() {
+		return listVolumeGroupSnapshotClasses(
+			ctx, k8sClient, selector,
+			&groupsnapv1beta1.VolumeGroupSnapshotClassList{},
+			func(list *groupsnapv1beta1.VolumeGroupSnapshotClassList) []VolumeGroupSnapshotClassWrapper {
+				wrappers := make([]VolumeGroupSnapshotClassWrapper, 0, len(list.Items))
+				for i := range list.Items {
+					wrappers = append(wrappers, &privateVGSCWrapper{vgsc: &list.Items[i]})
+				}
 
-			return wrappers
-		},
-	)
+				return wrappers
+			},
+		)
+	}
+
+	return make([]VolumeGroupSnapshotClassWrapper, 0), nil
 }
 
 func listVolumeGroupSnapshotClasses[L client.ObjectList](

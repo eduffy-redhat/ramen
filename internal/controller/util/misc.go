@@ -47,6 +47,11 @@ const (
 	VGSCRDName        = "volumegroupsnapshots.groupsnapshot.storage.k8s.io"
 	VGRCRDName        = "volumegroupreplications.replication.storage.openshift.io"
 
+	// VolumeGroupSnapshotClass ships as a CRD of its own, separate from the
+	// VolumeGroupSnapshot CRD above; either can be installed without the other.
+	VGSClassCRDPrivateName = "volumegroupsnapshotclasses.groupsnapshot.storage.openshift.io"
+	VGSClassCRDName        = "volumegroupsnapshotclasses.groupsnapshot.storage.k8s.io"
+
 	VRGOwnerNameLabel      string = "volumereplicationgroups-owner"
 	VRGOwnerNamespaceLabel string = "volumereplicationgroups-owner-namespace"
 
