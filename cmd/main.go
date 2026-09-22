@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -300,6 +301,13 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(logOpts)))
+
+	ref, exists := os.LookupEnv("VCS_REF")
+	if exists {
+		setupLog.Info("Built from VCS_REF", "VCS_REF: ", ref)
+	} else {
+		setupLog.Info("VCS_REF: <Not Found>")
+	}
 
 	ramenConfig := controllers.LoadControllerConfig(setupLog)
 

@@ -32,6 +32,9 @@ COPY --from=builder /workspace/manager .
 RUN mkdir -p licenses
 COPY LICENSE licenses/Apache-2.0.txt
 
+ARG vcsref=0
+ENV VCS_REF=$vcsref
+
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]
